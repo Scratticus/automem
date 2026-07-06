@@ -1055,6 +1055,15 @@ def create_memory_blueprint_full(
         )
 
         if request.method == "DELETE":
+            if MEMORY_STRICT_VALIDATION:
+                # Strict instances have no bulk removal path at all: a tag match
+                # can silently take thousands of memories with no dry-run, which
+                # is incompatible with a gate whose premise is deliberate writes.
+                abort(
+                    403,
+                    description="Bulk delete by tag is disabled under strict mode; "
+                    "delete memories individually by id.",
+                )
             deleted_count = 0
             while True:
                 memories, _ = _load_memories_by_tag_page(

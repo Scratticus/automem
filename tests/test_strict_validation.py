@@ -467,6 +467,19 @@ class TestBatchGate:
 # FAILS WHEN: never; asserts the MERGE query runs against the deleted node's tags
 # PASSES INSTEAD: n/a
 # =============================================================================
+class TestBulkDeleteDisabled:
+    # TESTS: strict instances have no bulk removal path
+    # FAILS WHEN: DELETE /memory/by-tag is attempted with strict mode on (403)
+    # PASSES INSTEAD: individual DELETE /memory/<id>, each crossing the delete guard
+    def test_by_tag_delete_refused_under_strict(self, client, auth_headers, strict):
+        r = client.delete("/memory/by-tag?tags=anything", headers=auth_headers)
+        assert r.status_code == 403
+
+    def test_by_tag_delete_allowed_when_off(self, client, auth_headers):
+        r = client.delete("/memory/by-tag?tags=anything", headers=auth_headers)
+        assert r.status_code != 403
+
+
 class TestClusterVersions:
     def test_delete_bumps(self, client, auth_headers, strict, reset_state):
         stored = _post(
