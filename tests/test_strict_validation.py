@@ -350,6 +350,43 @@ class TestStoreGate:
 # PASSES INSTEAD: PATCHed content meets the same bar as a fresh store
 # =============================================================================
 class TestPatchParity:
+    def test_inherited_entity_tags_do_not_block_update(self, client, auth_headers, monkeypatch):
+        # Enrichment injects entity:* tags server-side; an update that does not
+        # touch tags must not be rejected for inheriting them. Store the memory
+        # with the gate off (how pre-strict/enriched corpora arose), then update
+        # with the gate on.
+        stored = _post(
+            client,
+            auth_headers,
+            {"content": VALID_DECISION, "type": "Decision", "tags": ["tooling", "entity:tools:uv"]},
+        )
+        memory_id = stored.get_json()["memory_id"]
+        monkeypatch.setattr(memory_api, "MEMORY_STRICT_VALIDATION", True)
+        r = client.patch(
+            f"/memory/{memory_id}",
+            data=json.dumps({"content": VALID_DECISION.replace("use uv", "always use uv")}),
+            content_type="application/json",
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+
+    def test_client_supplied_reserved_tag_still_rejects_on_update(
+        self, client, auth_headers, strict
+    ):
+        stored = _post(
+            client,
+            auth_headers,
+            {"content": VALID_DECISION, "type": "Decision", "tags": ["tooling"]},
+        )
+        memory_id = stored.get_json()["memory_id"]
+        r = client.patch(
+            f"/memory/{memory_id}",
+            data=json.dumps({"tags": ["entity:tools:uv"]}),
+            content_type="application/json",
+            headers=auth_headers,
+        )
+        assert r.status_code == 400
+
     def test_oversize_and_bad_shape_reject(self, client, auth_headers, strict):
         stored = _post(
             client,

@@ -907,7 +907,13 @@ def create_memory_blueprint_full(
                 )
             importance = coerce_importance(importance)
             confidence = coerce_importance(confidence)
-            memory_type, strict_warnings = _strict_gate(new_content or "", memory_type, tags)
+            # Validate only client-SUPPLIED tags: the inherited tag list contains
+            # server-injected entity:* tags, which are the enrichment worker's to
+            # write — the reserved-namespace check guards client writes only.
+            client_tags = (
+                normalize_tag_list(payload.get("tags")) if payload.get("tags") is not None else []
+            )
+            memory_type, strict_warnings = _strict_gate(new_content or "", memory_type, client_tags)
 
         update_query = """
             MATCH (m:Memory {id: $id})
