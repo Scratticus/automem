@@ -217,13 +217,14 @@ def parse_memory(
     top = TOP_LINE_RE.match(lines[0])
     if top:
         name, scope, tier = top["name"], top["scope"], int(top["tier"])
-        encoded = sorted(set(name.split("-")) & TYPE_WORDS)
-        if encoded:
+        # A name may reference OTHER type words as topic vocabulary ("driver-style"
+        # on a Decision); it must not restate the memory's own type.
+        if memory_type and memory_type.lower() in name.split("-"):
             findings.append(
                 Finding(
                     "name-encodes-type",
                     SEVERITY_REJECT,
-                    f"Memory name encodes its type ({', '.join(encoded)}); "
+                    f"Memory name restates its own type ({memory_type.lower()}); "
                     "the type field carries that — rename.",
                 )
             )

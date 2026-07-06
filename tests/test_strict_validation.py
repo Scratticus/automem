@@ -124,9 +124,14 @@ class TestTopLine:
             _, findings = _validate(top + "\nDO things")
             assert not _rejects(findings, "memory-format/top-line")
 
-    def test_name_encoding_type_rejects(self):
-        _, findings = _validate("uv-decision | tier:2\nDO use uv")
+    def test_name_restating_own_type_rejects(self):
+        _, findings = _validate("uv-decision | tier:2\nDO use uv", "Decision")
         assert _rejects(findings, "name-encodes-type")
+
+    def test_other_type_word_in_name_passes(self):
+        # "style" as topic vocabulary on a Decision is legitimate (driver-style case)
+        _, findings = _validate("driver-style | tier:2\nDO propose one step", "Decision")
+        assert not _rejects(findings, "name-encodes-type")
 
     def test_empty_content_rejects(self):
         _, findings = _validate("")
