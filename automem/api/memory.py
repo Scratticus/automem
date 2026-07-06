@@ -5,17 +5,62 @@ import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from flask import Blueprint, abort, jsonify, request
+from flask import Blueprint, abort, jsonify, make_response, request
 from flask.typing import ResponseReturnValue
 
 from automem.config import (
     CLASSIFICATION_MODEL,
+    MEMORY_AUTHORING_STANDARD_FILE,
     MEMORY_AUTO_SUMMARIZE,
     MEMORY_CONTENT_HARD_LIMIT,
     MEMORY_CONTENT_SOFT_LIMIT,
+    MEMORY_STRICT_CONTRIBUTOR_NAMES,
+    MEMORY_STRICT_VALIDATION,
     MEMORY_SUMMARY_TARGET_LENGTH,
+    MEMORY_TYPES,
+    TYPE_ALIASES,
+    normalize_memory_type,
+)
+from automem.memory_validation import (
+    authoring_standard,
+    rejection_body,
+    split_findings,
+    validate_memory,
 )
 from automem.utils.text import should_summarize_content, summarize_content
+
+
+def _strict_gate(
+    content: str, memory_type: Optional[str], tags: List[str]
+) -> tuple[Optional[str], List[Dict[str, str]]]:
+    """Run strict-mode validation for one memory write.
+
+    Returns (canonical_type, warnings) — the type comes back alias-normalized so
+    strict instances only ever store canonical types. Aborts the request with a
+    400 findings body (carrying the authoring standard) on any rejection.
+    """
+    # Normalize aliases BEFORE validating so the shape check runs against the
+    # canonical type ("decision" must be held to the Decision schema, not skipped).
+    canonical = memory_type
+    if memory_type:
+        normalized, _ = normalize_memory_type(memory_type)
+        if normalized:
+            canonical = normalized
+    _, findings = validate_memory(
+        content,
+        canonical,
+        tags,
+        known_types=MEMORY_TYPES,
+        type_aliases=TYPE_ALIASES,
+        contributor_names=MEMORY_STRICT_CONTRIBUTOR_NAMES,
+    )
+    rejections, warnings = split_findings(findings)
+    if rejections:
+        body = rejection_body(
+            rejections, warnings, authoring_standard(MEMORY_AUTHORING_STANDARD_FILE)
+        )
+        abort(make_response(jsonify(body), 400))
+    return canonical, [w.to_dict() for w in warnings]
 
 
 def _validate_memory_id(memory_id: str) -> None:
@@ -430,6 +475,23 @@ def create_memory_blueprint_full(
 ) -> Blueprint:
     bp = Blueprint("memory", __name__)
 
+    def _bump_cluster_versions(graph: Any, tags: List[str]) -> None:
+        """Strict mode: bump the per-tag cluster version on any accepted write.
+
+        The counters are the staleness signal for lazily-regenerated artifacts
+        (rendered rule packs / skills). Best-effort — never blocks the write.
+        """
+        if not tags:
+            return
+        try:
+            graph.query(
+                "UNWIND $tags AS t MERGE (v:ClusterVersion {tag: t}) "
+                "SET v.version = coalesce(v.version, 0) + 1, v.updated_at = $now",
+                {"tags": tags, "now": utc_now()},
+            )
+        except Exception:
+            logger.exception("Cluster version bump failed")
+
     @bp.route("/memory", methods=["POST"])
     def store() -> Any:
         query_start = time.perf_counter()
@@ -454,7 +516,10 @@ def create_memory_blueprint_full(
                 f"({len(content)} provided). Please split into smaller memories or summarize.",
             )
 
-        if content_action == "summarize" and MEMORY_AUTO_SUMMARIZE:
+        if content_action == "summarize" and MEMORY_AUTO_SUMMARIZE and not MEMORY_STRICT_VALIDATION:
+            # Strict mode never auto-summarizes: a silent LLM rewrite would break
+            # the very shape guarantees the mode enforces. Oversized-but-valid
+            # content comes back as a warning instead.
             openai_client = get_openai_client() if get_openai_client else None
             if openai_client:
                 summary = summarize_content(
@@ -517,6 +582,20 @@ def create_memory_blueprint_full(
                 type_confidence = coerce_importance(type_confidence)
         else:
             memory_type, type_confidence = memory_classify(content)
+
+        strict_warnings: List[Dict[str, str]] = []
+        if MEMORY_STRICT_VALIDATION:
+            memory_type, strict_warnings = _strict_gate(content, memory_type, tags)
+            if len(content) > MEMORY_CONTENT_SOFT_LIMIT:
+                strict_warnings.append(
+                    {
+                        "check": "content-soft-limit",
+                        "severity": "warn",
+                        "message": f"Content is {len(content)} chars (soft limit "
+                        f"{MEMORY_CONTENT_SOFT_LIMIT}); strict mode never auto-summarizes "
+                        "— split into atomic memories or tighten.",
+                    }
+                )
 
         t_valid = payload.get("t_valid")
         t_invalid = payload.get("t_invalid")
@@ -620,6 +699,9 @@ def create_memory_blueprint_full(
             logger.exception("Failed to persist memory in FalkorDB")
             abort(500, description="Failed to store memory in FalkorDB")
 
+        if MEMORY_STRICT_VALIDATION:
+            _bump_cluster_versions(graph, tags_lower)
+
         # Queue enrichment
         enqueue_enrichment(memory_id)
 
@@ -690,6 +772,9 @@ def create_memory_blueprint_full(
             response["summarized"] = True
             response["original_length"] = len(original_content)
             response["summarized_length"] = len(content)
+
+        if strict_warnings:
+            response["warnings"] = strict_warnings
 
         logger.info(
             "memory_stored",
@@ -810,6 +895,20 @@ def create_memory_blueprint_full(
             except ValueError as exc:
                 abort(400, description=f"Invalid last_accessed: {exc}")
 
+        strict_warnings: List[Dict[str, str]] = []
+        if MEMORY_STRICT_VALIDATION:
+            # Parity with POST /memory: without these, PATCH bypasses the hard
+            # content limit and range coercion entirely.
+            if len(new_content or "") > MEMORY_CONTENT_HARD_LIMIT:
+                abort(
+                    400,
+                    description=f"Content exceeds maximum length of {MEMORY_CONTENT_HARD_LIMIT} "
+                    f"characters ({len(new_content)} provided).",
+                )
+            importance = coerce_importance(importance)
+            confidence = coerce_importance(confidence)
+            memory_type, strict_warnings = _strict_gate(new_content or "", memory_type, tags)
+
         update_query = """
             MATCH (m:Memory {id: $id})
             SET m.content = $content,
@@ -891,7 +990,17 @@ def create_memory_blueprint_full(
                         collection_name,
                     )
 
-        return jsonify({"status": "success", "memory_id": memory_id})
+        update_response: Dict[str, Any] = {"status": "success", "memory_id": memory_id}
+        if MEMORY_STRICT_VALIDATION:
+            old_tags = [
+                t.strip().lower()
+                for t in (current.get("tags") or [])
+                if isinstance(t, str) and t.strip()
+            ]
+            _bump_cluster_versions(graph, sorted(set(tags_lower) | set(old_tags)))
+            if strict_warnings:
+                update_response["warnings"] = strict_warnings
+        return jsonify(update_response)
 
     @bp.route("/memory/<memory_id>", methods=["DELETE"])
     def delete(memory_id: str) -> Any:
@@ -904,7 +1013,19 @@ def create_memory_blueprint_full(
         if not getattr(result, "result_set", None):
             abort(404, description="Memory not found")
 
+        deleted_tags: List[str] = []
+        if MEMORY_STRICT_VALIDATION:
+            deleted_node = serialize_node(result.result_set[0][0])
+            deleted_tags = [
+                t.strip().lower()
+                for t in (deleted_node.get("tags") or [])
+                if isinstance(t, str) and t.strip()
+            ]
+
         graph.query("MATCH (m:Memory {id: $id}) DETACH DELETE m", {"id": memory_id})
+
+        if MEMORY_STRICT_VALIDATION:
+            _bump_cluster_versions(graph, deleted_tags)
 
         _delete_qdrant_points(
             qdrant_client=get_qdrant_client(),
@@ -1097,6 +1218,7 @@ def create_memory_blueprint_full(
 
         # 1. Validate and prepare all memories
         validated = []
+        batch_warnings: Dict[str, List[Dict[str, str]]] = {}
         for i, mem in enumerate(memories_input):
             if not isinstance(mem, dict):
                 abort(400, description=f"Memory at index {i} must be an object")
@@ -1115,7 +1237,11 @@ def create_memory_blueprint_full(
             content_action = should_summarize_content(
                 content, MEMORY_CONTENT_SOFT_LIMIT, MEMORY_CONTENT_HARD_LIMIT
             )
-            if content_action == "summarize" and MEMORY_AUTO_SUMMARIZE:
+            if (
+                content_action == "summarize"
+                and MEMORY_AUTO_SUMMARIZE
+                and not MEMORY_STRICT_VALIDATION
+            ):
                 openai_client = get_openai_client() if get_openai_client else None
                 if openai_client:
                     summary = summarize_content(
@@ -1144,6 +1270,14 @@ def create_memory_blueprint_full(
                 try:
                     created_at = normalize_timestamp(mem["timestamp"])
                 except ValueError:
+                    if MEMORY_STRICT_VALIDATION:
+                        # Parity with POST /memory, which rejects bad timestamps
+                        # instead of silently substituting the current time.
+                        abort(
+                            400,
+                            description=f"Memory at index {i} has an invalid timestamp "
+                            f"({mem['timestamp']!r}).",
+                        )
                     logger.warning(
                         "Invalid timestamp at index %d (%s), using current time",
                         i,
@@ -1162,6 +1296,31 @@ def create_memory_blueprint_full(
                 )
             else:
                 memory_type, type_confidence = memory_classify(content)
+
+            if MEMORY_STRICT_VALIDATION:
+                if memory_type:
+                    normalized_type, _ = normalize_memory_type(memory_type)
+                    if normalized_type:
+                        memory_type = normalized_type
+                _, findings = validate_memory(
+                    content,
+                    memory_type,
+                    tags,
+                    known_types=MEMORY_TYPES,
+                    type_aliases=TYPE_ALIASES,
+                    contributor_names=MEMORY_STRICT_CONTRIBUTOR_NAMES,
+                )
+                rejections, item_warnings = split_findings(findings)
+                if rejections:
+                    body = rejection_body(
+                        rejections,
+                        item_warnings,
+                        authoring_standard(MEMORY_AUTHORING_STANDARD_FILE),
+                    )
+                    body["index"] = i
+                    abort(make_response(jsonify(body), 400))
+                if item_warnings:
+                    batch_warnings[str(i)] = [w.to_dict() for w in item_warnings]
 
             validated.append(
                 {
@@ -1304,6 +1463,17 @@ def create_memory_blueprint_full(
         for v in validated:
             enqueue_enrichment(v["id"])
 
+        if MEMORY_STRICT_VALIDATION:
+            all_tags = sorted(
+                {
+                    t.strip().lower()
+                    for v in validated
+                    for t in (v["tags"] or [])
+                    if isinstance(t, str) and t.strip()
+                }
+            )
+            _bump_cluster_versions(graph, all_tags)
+
         elapsed_ms = round((time.perf_counter() - query_start) * 1000, 2)
         logger.info(
             "batch_stored",
@@ -1314,18 +1484,16 @@ def create_memory_blueprint_full(
             },
         )
 
-        return (
-            jsonify(
-                {
-                    "status": "success",
-                    "stored": len(validated),
-                    "memory_ids": [v["id"] for v in validated],
-                    "qdrant": qdrant_status,
-                    "enrichment": "queued" if state.enrichment_queue else "disabled",
-                    "query_time_ms": elapsed_ms,
-                }
-            ),
-            201,
-        )
+        batch_response = {
+            "status": "success",
+            "stored": len(validated),
+            "memory_ids": [v["id"] for v in validated],
+            "qdrant": qdrant_status,
+            "enrichment": "queued" if state.enrichment_queue else "disabled",
+            "query_time_ms": elapsed_ms,
+        }
+        if batch_warnings:
+            batch_response["warnings"] = batch_warnings
+        return jsonify(batch_response), 201
 
     return bp

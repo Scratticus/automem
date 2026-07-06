@@ -342,6 +342,25 @@ Controls auto-summarization and content size validation on store.
 | `MEMORY_AUTO_SUMMARIZE` | Enable/disable auto-summarization | `true` | `false` stores as-is |
 | `MEMORY_SUMMARY_TARGET_LENGTH` | Target length for summarized content | `300` | Characters |
 
+### Strict-Mode Validation (opt-in)
+
+Server-side enforcement that memories stay machine-renderable, applied at every write
+path (`POST /memory`, `PATCH /memory/<id>`, `POST /memory/batch`, and `DELETE` for
+version counters). The gate is hard: every finding returns `400` with a `findings`
+list and the instance's authoring standard, and the only way through is a rewrite
+that satisfies it. With strict mode enabled,
+auto-summarization is disabled (no silent content mutation), `PATCH` gains the same
+content-limit and range coercion as `POST`, batch timestamp errors reject instead of
+silently substituting the current time, and per-tag `ClusterVersion` counters are
+bumped on every accepted write (the staleness signal for artifacts rendered from the
+graph).
+
+| Variable | Description | Default | Notes |
+|----------|-------------|---------|-------|
+| `MEMORY_STRICT_VALIDATION` | Enable strict-mode validation | `false` | Type enum enforced (aliases normalized to canonical), reserved tag namespaces (`entity:`/`person:`) rejected, unambiguous credential patterns rejected, per-type content shapes enforced |
+| `MEMORY_AUTHORING_STANDARD_FILE` | Path to the authoring standard document attached to strict-mode `400` bodies | unset | Teaches rejected clients the expected format |
+| `MEMORY_STRICT_CONTRIBUTOR_NAMES` | Comma-separated contributor names rejected in content | unset | Provenance belongs in entity tags/metadata, not content |
+
 ### Sync Configuration
 
 Background worker that checks FalkorDB ↔ Qdrant consistency.

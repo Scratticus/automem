@@ -64,6 +64,9 @@ services:
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-auto} # auto|voyage|openai|local|placeholder
       MEMORY_CONTENT_HARD_LIMIT: ${MEMORY_CONTENT_HARD_LIMIT:-2000}
       MEMORY_AUTO_SUMMARIZE: ${MEMORY_AUTO_SUMMARIZE:-true}
+      MEMORY_STRICT_VALIDATION: ${MEMORY_STRICT_VALIDATION:-false}
+      MEMORY_AUTHORING_STANDARD_FILE: ${MEMORY_AUTHORING_STANDARD_FILE:-}
+      MEMORY_STRICT_CONTRIBUTOR_NAMES: ${MEMORY_STRICT_CONTRIBUTOR_NAMES:-}
       AUTOMEM_MODELS_DIR: /root/.config/automem/models # Keep in sync with volume mount
     depends_on:
       falkordb:

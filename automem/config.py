@@ -161,6 +161,28 @@ MEMORY_AUTO_SUMMARIZE = os.getenv("MEMORY_AUTO_SUMMARIZE", "true").lower() not i
 # Target length for summarized content
 MEMORY_SUMMARY_TARGET_LENGTH = int(os.getenv("MEMORY_SUMMARY_TARGET_LENGTH", "300"))
 
+# Strict-mode validation (opt-in). When enabled, every write path (store, update,
+# batch) validates memories for machine-renderability: type enum, reserved tag
+# namespaces, credential patterns, and per-type content shape. Violations return
+# 400 with the findings and the instance's authoring standard; advisory findings
+# come back as "warnings" on successful writes. Strict mode never auto-summarizes
+# (no silent content mutation).
+MEMORY_STRICT_VALIDATION = os.getenv("MEMORY_STRICT_VALIDATION", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+# Optional path to the authoring standard document attached to strict-mode 400s.
+MEMORY_AUTHORING_STANDARD_FILE = os.getenv("MEMORY_AUTHORING_STANDARD_FILE", "")
+# Optional comma-separated contributor names; strict mode rejects content that
+# names a contributor (provenance belongs in entity tags/metadata, not content).
+MEMORY_STRICT_CONTRIBUTOR_NAMES = [
+    name.strip()
+    for name in os.getenv("MEMORY_STRICT_CONTRIBUTOR_NAMES", "").split(",")
+    if name.strip()
+]
+
 # Memory types for classification
 MEMORY_TYPES = {"Decision", "Pattern", "Preference", "Style", "Habit", "Insight", "Context"}
 
