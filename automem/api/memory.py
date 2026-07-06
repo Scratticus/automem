@@ -492,6 +492,39 @@ def create_memory_blueprint_full(
         except Exception:
             logger.exception("Cluster version bump failed")
 
+    @bp.route("/memory/validate", methods=["POST"])
+    def validate() -> Any:
+        """Dry-run the write gate: return the findings for a draft memory, write nothing.
+
+        This is what client preflights call instead of carrying their own copy
+        of the rules — one rule source, no client drift. Always 200; an empty
+        findings list means the draft would be accepted.
+        """
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            abort(400, description="JSON body is required")
+        raw_type = payload.get("type")
+        canonical = raw_type
+        if raw_type:
+            normalized, _ = normalize_memory_type(raw_type)
+            if normalized:
+                canonical = normalized
+        _, findings = validate_memory(
+            (payload.get("content") or "").strip(),
+            canonical,
+            normalize_tags(payload.get("tags")),
+            known_types=MEMORY_TYPES,
+            type_aliases=TYPE_ALIASES,
+            contributor_names=MEMORY_STRICT_CONTRIBUTOR_NAMES,
+        )
+        return jsonify(
+            {
+                "findings": [f.to_dict() for f in findings],
+                "canonical_type": canonical,
+                "strict_enforced": MEMORY_STRICT_VALIDATION,
+            }
+        )
+
     @bp.route("/memory", methods=["POST"])
     def store() -> Any:
         query_start = time.perf_counter()
