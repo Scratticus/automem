@@ -11,6 +11,7 @@ from automem.api.graph import create_graph_blueprint
 from automem.api.health import create_health_blueprint
 from automem.api.memory import create_memory_blueprint_full
 from automem.api.recall import create_recall_blueprint
+from automem.api.rulepack import create_rulepack_blueprint
 from automem.api.stream import create_stream_blueprint
 from automem.api.viewer import create_viewer_blueprint, is_viewer_enabled
 
@@ -191,6 +192,13 @@ def register_blueprints(
         require_admin_token_fn=require_admin_token_fn,
     )
 
+    rulepack_bp = create_rulepack_blueprint(
+        get_memory_graph_fn,
+        serialize_node_fn,
+        utc_now_fn,
+        logger,
+    )
+
     app.register_blueprint(health_bp)
     app.register_blueprint(enrichment_bp)
     app.register_blueprint(memory_bp)
@@ -201,6 +209,7 @@ def register_blueprints(
     app.register_blueprint(graph_bp)
     app.register_blueprint(stream_bp)
     app.register_blueprint(entity_bp)
+    app.register_blueprint(rulepack_bp)
 
     if is_viewer_enabled():
         viewer_bp = create_viewer_blueprint()
