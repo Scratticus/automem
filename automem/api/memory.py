@@ -643,6 +643,11 @@ def create_memory_blueprint_full(
                     response["duplicate_suspects"] = find_duplicate_suspects(
                         probe_client, collection_name, vector, exclude_id=exclude_id
                     )
+        if response["findings"]:
+            # Mirror the 400 gate: a failed preflight carries the standard, so a
+            # thin client attaches it to its deny without holding a local copy —
+            # the server file is the ONLY copy anywhere.
+            response["authoring_standard"] = authoring_standard(MEMORY_AUTHORING_STANDARD_FILE)
         return jsonify(response)
 
     @bp.route("/memory", methods=["POST"])

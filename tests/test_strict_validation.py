@@ -734,3 +734,29 @@ class TestDuplicateNameGate:
         _seed(reset_state, U1, EXISTING)
         r = _post(client, auth_headers, {"content": COLLIDER, "type": "Decision"})
         assert r.status_code == 201
+
+    def test_validate_serves_standard_on_findings(
+        self, client, auth_headers, strict, reset_state, monkeypatch, tmp_path
+    ):
+        standard = tmp_path / "standard.xml"
+        standard.write_text("<standard>single source</standard>")
+        monkeypatch.setattr(memory_api, "MEMORY_AUTHORING_STANDARD_FILE", str(standard))
+        _seed(reset_state, U1, EXISTING)
+        r = _post(
+            client,
+            auth_headers,
+            {"content": COLLIDER, "type": "Decision"},
+            path="/memory/validate",
+        )
+        assert r.get_json()["authoring_standard"] == "<standard>single source</standard>"
+
+    def test_validate_no_standard_when_clean(self, client, auth_headers, strict, reset_state):
+        r = _post(
+            client,
+            auth_headers,
+            {"content": VALID_DECISION, "type": "Decision"},
+            path="/memory/validate",
+        )
+        body = r.get_json()
+        assert body["findings"] == []
+        assert "authoring_standard" not in body
