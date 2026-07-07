@@ -491,3 +491,246 @@ class TestClusterVersions:
         reset_state.queries.clear()
         assert client.delete(f"/memory/{memory_id}", headers=auth_headers).status_code == 200
         assert any("ClusterVersion" in q for q, _ in reset_state.queries)
+
+
+# =============================================================================
+# TESTS: the duplicate gate — names are identifiers; similarity is advisory
+# FAILS WHEN: a store/PATCH/batch item claims an existing memory's name without
+#   the class:log record-class tag (400 duplicate-name, carrying the existing
+#   memory so the rework is "update it or genuinely rename")
+# PASSES INSTEAD: class:log record entries sharing names by design (event logs —
+#   e.g. one job-application entry per role on the same day); renames to new
+#   names; similar-but-differently-named memories, which come back as ADVISORY
+#   duplicate_suspects and warnings, never a rejection (corpus calibration
+#   2026-07-07: legitimate siblings can outscore genuine duplicates on cosine)
+# =============================================================================
+
+EXISTING = "dup-target | scope:tooling | tier:2\nDO exist first"
+COLLIDER = "dup-target | scope:tooling | tier:2\nDO exist twice"
+U1 = "00000000-0000-0000-0000-000000000001"
+U2 = "00000000-0000-0000-0000-000000000002"
+U3 = "00000000-0000-0000-0000-000000000003"
+
+
+def _seed(graph, mid, content, mtype="Decision", tags=None):
+    graph.memories[mid] = {
+        "id": mid,
+        "content": content,
+        "tags": tags or [],
+        "type": mtype,
+        "importance": 0.5,
+        "metadata": "{}",
+        "timestamp": "2026-07-07T00:00:00+00:00",
+    }
+
+
+class FakeHit:
+    def __init__(self, hit_id, score, content):
+        self.id = hit_id
+        self.score = score
+        self.payload = {"content": content}
+
+
+class FakeQdrant:
+    def __init__(self, hits=()):
+        self.hits = list(hits)
+        self.upserts = []
+
+    def search(self, **kwargs):
+        return self.hits
+
+    def upsert(self, **kwargs):
+        self.upserts.append(kwargs)
+
+    def retrieve(self, **kwargs):
+        return []
+
+
+def _patch(client, auth_headers, memory_id, payload):
+    return client.patch(
+        f"/memory/{memory_id}",
+        data=json.dumps(payload),
+        content_type="application/json",
+        headers=auth_headers,
+    )
+
+
+class TestDuplicateNameGate:
+    def test_memory_name_extraction(self):
+        assert mv.memory_name(EXISTING) == "dup-target"
+        assert mv.memory_name("no top line here") is None
+        assert mv.memory_name("") is None
+
+    def test_store_collision_rejects(self, client, auth_headers, strict, reset_state):
+        _seed(reset_state, U1, EXISTING)
+        r = _post(client, auth_headers, {"content": COLLIDER, "type": "Decision"})
+        assert r.status_code == 400
+        body = r.get_json()
+        assert any(f["check"] == "duplicate-name" for f in body["findings"])
+        assert body["existing_memory"]["id"] == U1
+        assert body["existing_memory"]["content"] == EXISTING
+
+    def test_prefix_name_is_not_a_collision(self, client, auth_headers, strict, reset_state):
+        _seed(reset_state, U1, EXISTING)
+        r = _post(
+            client,
+            auth_headers,
+            {"content": "dup-target-two | tier:2\nDO differ", "type": "Decision"},
+        )
+        assert r.status_code == 201
+
+    def test_log_class_incoming_exempt(self, client, auth_headers, strict, reset_state):
+        _seed(
+            reset_state,
+            U1,
+            "app-2026-07-07-acme | scope:career | tier:2\nDEFINES applied — Acme, role A.",
+            "Context",
+            tags=["class:log"],
+        )
+        r = _post(
+            client,
+            auth_headers,
+            {
+                "content": "app-2026-07-07-acme | scope:career | tier:2\n"
+                "DEFINES applied — Acme, role B.",
+                "type": "Context",
+                "tags": ["class:log"],
+            },
+        )
+        assert r.status_code == 201
+
+    def test_log_class_existing_never_blocks(self, client, auth_headers, strict, reset_state):
+        _seed(reset_state, U1, EXISTING, tags=["class:log"])
+        r = _post(client, auth_headers, {"content": COLLIDER, "type": "Decision"})
+        assert r.status_code == 201
+
+    def test_patch_rename_collision_rejects(self, client, auth_headers, strict, reset_state):
+        _seed(reset_state, U1, EXISTING)
+        _seed(reset_state, U2, "other-name | tier:2\nDO differ")
+        r = _patch(client, auth_headers, U2, {"content": COLLIDER})
+        assert r.status_code == 400
+        body = r.get_json()
+        assert any(f["check"] == "duplicate-name" for f in body["findings"])
+        assert body["existing_memory"]["id"] == U1
+
+    def test_patch_keeps_own_name(self, client, auth_headers, strict, reset_state):
+        _seed(reset_state, U1, EXISTING)
+        r = _patch(client, auth_headers, U1, {"content": COLLIDER})
+        assert r.status_code == 200
+
+    def test_patch_merged_log_tag_exempts(self, client, auth_headers, strict, reset_state):
+        _seed(reset_state, U1, EXISTING)
+        _seed(reset_state, U2, "other-name | tier:2\nDO differ", tags=["class:log"])
+        # No tags in the PATCH body: the exemption must come from the MERGED tags.
+        r = _patch(client, auth_headers, U2, {"content": COLLIDER})
+        assert r.status_code == 200
+
+    def test_validate_reports_collision_without_writing(
+        self, client, auth_headers, strict, reset_state
+    ):
+        _seed(reset_state, U1, EXISTING)
+        r = _post(
+            client, auth_headers, {"content": COLLIDER, "type": "Decision"}, path="/memory/validate"
+        )
+        assert r.status_code == 200
+        body = r.get_json()
+        assert any(f["check"] == "duplicate-name" for f in body["findings"])
+        assert body["existing_memory"]["id"] == U1
+        assert len(reset_state.memories) == 1  # dry run: nothing stored
+
+    def test_validate_exclude_id_skips_own_node(self, client, auth_headers, strict, reset_state):
+        _seed(reset_state, U1, EXISTING)
+        r = _post(
+            client,
+            auth_headers,
+            {"content": COLLIDER, "type": "Decision", "exclude_id": U1},
+            path="/memory/validate",
+        )
+        assert not any(f["check"] == "duplicate-name" for f in r.get_json()["findings"])
+
+    def test_store_suspects_advisory(self, client, auth_headers, strict, reset_state):
+        app.state.qdrant = FakeQdrant(
+            [
+                FakeHit("q-1", 0.93, "near-rule | tier:2\nDO x"),
+                FakeHit("q-2", 0.50, "far-rule | tier:2\nDO y"),
+            ]
+        )
+        vec = [0.1] * app.state.effective_vector_size
+        r = _post(
+            client,
+            auth_headers,
+            {"content": VALID_DECISION, "type": "Decision", "embedding": vec},
+        )
+        assert r.status_code == 201
+        body = r.get_json()
+        assert body["duplicate_suspects"] == [
+            {"id": "q-1", "name": "near-rule", "similarity": 0.93}
+        ]
+        assert any(w["check"] == "duplicate-suspects" for w in body["warnings"])
+
+    def test_log_class_skips_suspects(self, client, auth_headers, strict, reset_state):
+        app.state.qdrant = FakeQdrant([FakeHit("q-1", 0.93, "near-rule | tier:2\nDO x")])
+        vec = [0.1] * app.state.effective_vector_size
+        r = _post(
+            client,
+            auth_headers,
+            {
+                "content": "app-2026-07-07-beta | scope:career | tier:2\n"
+                "DEFINES applied — Beta GmbH, role C.",
+                "type": "Context",
+                "tags": ["class:log"],
+                "embedding": vec,
+            },
+        )
+        assert r.status_code == 201
+        assert "duplicate_suspects" not in r.get_json()
+
+    def test_batch_intra_batch_collision(self, client, auth_headers, strict):
+        r = _post(
+            client,
+            auth_headers,
+            {
+                "memories": [
+                    {"content": EXISTING, "type": "Decision"},
+                    {"content": COLLIDER, "type": "Decision"},
+                ]
+            },
+            path="/memory/batch",
+        )
+        assert r.status_code == 400
+        body = r.get_json()
+        assert body["index"] == 1
+        assert any(f["check"] == "duplicate-name" for f in body["findings"])
+
+    def test_batch_graph_collision(self, client, auth_headers, strict, reset_state):
+        _seed(reset_state, U1, EXISTING)
+        r = _post(
+            client,
+            auth_headers,
+            {"memories": [{"content": COLLIDER, "type": "Decision"}]},
+            path="/memory/batch",
+        )
+        assert r.status_code == 400
+        assert r.get_json()["existing_memory"]["id"] == U1
+
+    def test_batch_log_class_exempt(self, client, auth_headers, strict):
+        log_a = "app-2026-07-07-gamma | scope:career | tier:2\n" "DEFINES applied — Gamma, role A."
+        log_b = "app-2026-07-07-gamma | scope:career | tier:2\n" "DEFINES skipped — Gamma, role B."
+        r = _post(
+            client,
+            auth_headers,
+            {
+                "memories": [
+                    {"content": log_a, "type": "Context", "tags": ["class:log"]},
+                    {"content": log_b, "type": "Context", "tags": ["class:log"]},
+                ]
+            },
+            path="/memory/batch",
+        )
+        assert r.status_code == 201
+        assert r.get_json()["stored"] == 2
+
+    def test_flag_off_collision_stores(self, client, auth_headers, reset_state):
+        _seed(reset_state, U1, EXISTING)
+        r = _post(client, auth_headers, {"content": COLLIDER, "type": "Decision"})
+        assert r.status_code == 201

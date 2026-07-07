@@ -92,6 +92,19 @@ class FakeGraph:
         params = params or {}
         self.queries.append((query, params))
 
+        # Strict-mode duplicate-name gate: content-prefix lookup. Must precede the
+        # generic "RETURN m.id, m.content" handlers, which would shadow it.
+        if "STARTS WITH $p1" in query:
+            p1 = str(params.get("p1") or "")
+            p2 = str(params.get("p2") or "")
+            rows = [
+                [memory_id, memory.get("content", ""), memory.get("type"), memory.get("tags", [])]
+                for memory_id, memory in self.memories.items()
+                if str(memory.get("content", "")).startswith(p1)
+                or str(memory.get("content", "")).startswith(p2)
+            ]
+            return FakeResult(rows[:10])
+
         # Consolidation engine query patterns
         if "COUNT(DISTINCT r)" in query:
             memory_id = params.get("id")

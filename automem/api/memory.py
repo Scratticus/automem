@@ -14,6 +14,9 @@ from automem.config import (
     MEMORY_AUTO_SUMMARIZE,
     MEMORY_CONTENT_HARD_LIMIT,
     MEMORY_CONTENT_SOFT_LIMIT,
+    MEMORY_DUPLICATE_LOG_TAG,
+    MEMORY_DUPLICATE_SUSPECT_FLOOR,
+    MEMORY_DUPLICATE_SUSPECT_LIMIT,
     MEMORY_STRICT_CONTRIBUTOR_NAMES,
     MEMORY_STRICT_VALIDATION,
     MEMORY_SUMMARY_TARGET_LENGTH,
@@ -22,7 +25,9 @@ from automem.config import (
     normalize_memory_type,
 )
 from automem.memory_validation import (
+    Finding,
     authoring_standard,
+    memory_name,
     rejection_body,
     split_findings,
     validate_memory,
@@ -61,6 +66,96 @@ def _strict_gate(
         )
         abort(make_response(jsonify(body), 400))
     return canonical, [w.to_dict() for w in warnings]
+
+
+def _is_log_class(tags_lower: List[str]) -> bool:
+    """Record-class memories (event logs) legitimately share names and phrasing."""
+    return MEMORY_DUPLICATE_LOG_TAG in tags_lower
+
+
+def find_name_collision(
+    graph: Any, content: str, exclude_id: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Return the existing memory whose top-line name matches *content*'s, if any.
+
+    Names are identifiers ([[name]] links, skill routing, the renderer) — a second
+    memory under an existing name is a duplicate by definition. Corpus calibration
+    (2026-07-07) showed this is the reliable duplicate signal; cosine similarity
+    interleaves genuine duplicates with legitimate siblings and must stay advisory.
+    """
+    name = memory_name(content)
+    if not name:
+        return None
+    result = graph.query(
+        "MATCH (m:Memory) WHERE m.content STARTS WITH $p1 OR m.content STARTS WITH $p2 "
+        "RETURN m.id, m.content, m.type, m.tags LIMIT 10",
+        {"p1": f"{name} |", "p2": f"{name}|"},
+    )
+    for row in getattr(result, "result_set", None) or []:
+        row_id, row_content, row_type = str(row[0]), row[1] or "", row[2]
+        row_tags = [str(t).lower() for t in (row[3] or [])]
+        if exclude_id and row_id == str(exclude_id):
+            continue
+        if memory_name(row_content) != name:
+            continue
+        if _is_log_class(row_tags):
+            # Existing log-class entries share names by design (one entry per
+            # event); they never block, and new entries exempt themselves by
+            # carrying the tag — checked by the caller before this lookup.
+            continue
+        return {"id": row_id, "content": row_content, "type": row_type}
+    return None
+
+
+def duplicate_name_finding(name: Optional[str], existing: Dict[str, Any]) -> Finding:
+    return Finding(
+        "duplicate-name",
+        "reject",
+        f"A memory named {name!r} already exists (id {existing['id']}, "
+        f"type {existing['type']}). Update the existing memory (PATCH) or choose a "
+        f"genuinely different name. Deliberate record-class memories that share names "
+        f"(event logs) must carry the {MEMORY_DUPLICATE_LOG_TAG!r} tag.",
+    )
+
+
+def find_duplicate_suspects(
+    qdrant_client: Any,
+    collection_name: str,
+    vector: List[float],
+    exclude_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """ADVISORY nearest-neighbour probe: the memories most similar to a draft.
+
+    Returned on store/validate responses for a human (via the harness linter) to
+    judge — never a rejection: legitimate siblings can outscore genuine duplicates.
+    Best-effort; any failure returns [] and never blocks the write.
+    """
+    try:
+        hits = qdrant_client.search(
+            collection_name=collection_name,
+            query_vector=vector,
+            limit=MEMORY_DUPLICATE_SUSPECT_LIMIT + (1 if exclude_id else 0),
+            with_payload=True,
+        )
+    except Exception:
+        return []
+    suspects = []
+    for hit in hits:
+        hit_id = str(hit.id)
+        if exclude_id and hit_id == str(exclude_id):
+            continue
+        score = float(hit.score)
+        if score < MEMORY_DUPLICATE_SUSPECT_FLOOR:
+            continue
+        payload = getattr(hit, "payload", None) or {}
+        suspects.append(
+            {
+                "id": hit_id,
+                "name": memory_name(payload.get("content") or "") or "?",
+                "similarity": round(score, 4),
+            }
+        )
+    return suspects[:MEMORY_DUPLICATE_SUSPECT_LIMIT]
 
 
 def _validate_memory_id(memory_id: str) -> None:
@@ -509,21 +604,46 @@ def create_memory_blueprint_full(
             normalized, _ = normalize_memory_type(raw_type)
             if normalized:
                 canonical = normalized
+        content = (payload.get("content") or "").strip()
+        tags = normalize_tags(payload.get("tags"))
         _, findings = validate_memory(
-            (payload.get("content") or "").strip(),
+            content,
             canonical,
-            normalize_tags(payload.get("tags")),
+            tags,
             known_types=MEMORY_TYPES,
             type_aliases=TYPE_ALIASES,
             contributor_names=MEMORY_STRICT_CONTRIBUTOR_NAMES,
         )
-        return jsonify(
-            {
-                "findings": [f.to_dict() for f in findings],
-                "canonical_type": canonical,
-                "strict_enforced": MEMORY_STRICT_VALIDATION,
-            }
-        )
+        response: Dict[str, Any] = {
+            "findings": [f.to_dict() for f in findings],
+            "canonical_type": canonical,
+            "strict_enforced": MEMORY_STRICT_VALIDATION,
+        }
+        # Duplicate checks mirror the store gate so preflights teach BEFORE the
+        # store attempt. The exclude_id param lets an update preflight skip the
+        # memory it is editing.
+        tags_lower = [t.strip().lower() for t in tags if isinstance(t, str) and t.strip()]
+        exclude_id = payload.get("exclude_id")
+        if content and not _is_log_class(tags_lower):
+            graph = get_memory_graph()
+            if graph is not None:
+                existing = find_name_collision(graph, content, exclude_id=exclude_id)
+                if existing:
+                    response["findings"].append(
+                        duplicate_name_finding(memory_name(content), existing).to_dict()
+                    )
+                    response["existing_memory"] = existing
+            probe_client = get_qdrant_client()
+            if probe_client is not None:
+                try:
+                    vector = generate_real_embedding(content)
+                except Exception:
+                    vector = None
+                if vector is not None:
+                    response["duplicate_suspects"] = find_duplicate_suspects(
+                        probe_client, collection_name, vector, exclude_id=exclude_id
+                    )
+        return jsonify(response)
 
     @bp.route("/memory", methods=["POST"])
     def store() -> Any:
@@ -652,6 +772,45 @@ def create_memory_blueprint_full(
         if graph is None:
             abort(503, description="FalkorDB is unavailable")
 
+        duplicate_suspects: List[Dict[str, Any]] = []
+        embedding_generated = False
+        if MEMORY_STRICT_VALIDATION and not _is_log_class(tags_lower):
+            existing = find_name_collision(graph, content)
+            if existing:
+                body = rejection_body(
+                    [duplicate_name_finding(memory_name(content), existing)],
+                    [],
+                    authoring_standard(MEMORY_AUTHORING_STANDARD_FILE),
+                )
+                body["existing_memory"] = existing
+                abort(make_response(jsonify(body), 400))
+            probe_client = get_qdrant_client()
+            if probe_client is not None:
+                if embedding is None:
+                    try:
+                        embedding = generate_real_embedding(content)
+                        embedding_generated = True
+                    except Exception:
+                        logger.exception("Embedding for duplicate probe failed; advisory skipped")
+                if embedding is not None:
+                    duplicate_suspects = find_duplicate_suspects(
+                        probe_client, collection_name, embedding
+                    )
+                    if duplicate_suspects:
+                        strict_warnings.append(
+                            {
+                                "check": "duplicate-suspects",
+                                "severity": "warn",
+                                "message": "Nearest existing memories: "
+                                + "; ".join(
+                                    f"{s['name']} ({s['id']}, {s['similarity']})"
+                                    for s in duplicate_suspects
+                                )
+                                + " — if one of these is the same fact, update it instead "
+                                "of storing a variant.",
+                            }
+                        )
+
         created_at = payload.get("timestamp")
         if created_at:
             try:
@@ -742,7 +901,7 @@ def create_memory_blueprint_full(
         embedding_status = "skipped"
         qdrant_client = get_qdrant_client()
         if embedding is not None:
-            embedding_status = "provided"
+            embedding_status = "generated" if embedding_generated else "provided"
             qdrant_result = None
             if qdrant_client is not None:
                 try:
@@ -808,6 +967,8 @@ def create_memory_blueprint_full(
 
         if strict_warnings:
             response["warnings"] = strict_warnings
+        if duplicate_suspects:
+            response["duplicate_suspects"] = duplicate_suspects
 
         logger.info(
             "memory_stored",
@@ -947,6 +1108,19 @@ def create_memory_blueprint_full(
                 normalize_tag_list(payload.get("tags")) if payload.get("tags") is not None else []
             )
             memory_type, strict_warnings = _strict_gate(new_content or "", memory_type, client_tags)
+            # Renaming onto an existing name is the same duplicate as storing one.
+            # Exemption checks the MERGED tags: an existing class:log node stays
+            # editable without the client re-sending its tag list.
+            if not _is_log_class(tags_lower):
+                existing = find_name_collision(graph, new_content or "", exclude_id=memory_id)
+                if existing:
+                    body = rejection_body(
+                        [duplicate_name_finding(memory_name(new_content or ""), existing)],
+                        [],
+                        authoring_standard(MEMORY_AUTHORING_STANDARD_FILE),
+                    )
+                    body["existing_memory"] = existing
+                    abort(make_response(jsonify(body), 400))
 
         update_query = """
             MATCH (m:Memory {id: $id})
@@ -986,9 +1160,28 @@ def create_memory_blueprint_full(
 
         qdrant_client = get_qdrant_client()
         vector = None
+        duplicate_suspects: List[Dict[str, Any]] = []
         if qdrant_client is not None:
             if new_content != current.get("content"):
                 vector = generate_real_embedding(new_content)
+                if MEMORY_STRICT_VALIDATION and not _is_log_class(tags_lower):
+                    duplicate_suspects = find_duplicate_suspects(
+                        qdrant_client, collection_name, vector, exclude_id=memory_id
+                    )
+                    if duplicate_suspects:
+                        strict_warnings.append(
+                            {
+                                "check": "duplicate-suspects",
+                                "severity": "warn",
+                                "message": "Nearest existing memories: "
+                                + "; ".join(
+                                    f"{s['name']} ({s['id']}, {s['similarity']})"
+                                    for s in duplicate_suspects
+                                )
+                                + " — if one of these is the same fact, update it instead "
+                                "of storing a variant.",
+                            }
+                        )
             else:
                 try:
                     existing = qdrant_client.retrieve(
@@ -1039,6 +1232,8 @@ def create_memory_blueprint_full(
             _bump_cluster_versions(graph, sorted(set(tags_lower) | set(old_tags)))
             if strict_warnings:
                 update_response["warnings"] = strict_warnings
+            if duplicate_suspects:
+                update_response["duplicate_suspects"] = duplicate_suspects
         return jsonify(update_response)
 
     @bp.route("/memory/<memory_id>", methods=["DELETE"])
@@ -1267,6 +1462,10 @@ def create_memory_blueprint_full(
         # 1. Validate and prepare all memories
         validated = []
         batch_warnings: Dict[str, List[Dict[str, str]]] = {}
+        batch_names: Dict[str, int] = {}
+        strict_graph = get_memory_graph() if MEMORY_STRICT_VALIDATION else None
+        if MEMORY_STRICT_VALIDATION and strict_graph is None:
+            abort(503, description="FalkorDB is unavailable")
         for i, mem in enumerate(memories_input):
             if not isinstance(mem, dict):
                 abort(400, description=f"Memory at index {i} must be an object")
@@ -1369,6 +1568,42 @@ def create_memory_blueprint_full(
                     abort(make_response(jsonify(body), 400))
                 if item_warnings:
                     batch_warnings[str(i)] = [w.to_dict() for w in item_warnings]
+                # Name-collision gate, batch flavour: also catches two items in
+                # THIS batch claiming the same name. No similarity advisory here
+                # (bulk ingestion stays single-pass; run the audit scanner after).
+                tags_lower_item = [
+                    t.strip().lower() for t in tags if isinstance(t, str) and t.strip()
+                ]
+                if not _is_log_class(tags_lower_item):
+                    item_name = memory_name(content)
+                    if item_name:
+                        prior_index = batch_names.get(item_name)
+                        if prior_index is not None:
+                            finding = Finding(
+                                "duplicate-name",
+                                "reject",
+                                f"Memories at indexes {prior_index} and {i} both claim the "
+                                f"name {item_name!r}; names are identifiers — merge them or "
+                                "rename one.",
+                            )
+                            body = rejection_body(
+                                [finding],
+                                [],
+                                authoring_standard(MEMORY_AUTHORING_STANDARD_FILE),
+                            )
+                            body["index"] = i
+                            abort(make_response(jsonify(body), 400))
+                        existing = find_name_collision(strict_graph, content)
+                        if existing:
+                            body = rejection_body(
+                                [duplicate_name_finding(item_name, existing)],
+                                [],
+                                authoring_standard(MEMORY_AUTHORING_STANDARD_FILE),
+                            )
+                            body["index"] = i
+                            body["existing_memory"] = existing
+                            abort(make_response(jsonify(body), 400))
+                        batch_names[item_name] = i
 
             validated.append(
                 {

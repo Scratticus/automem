@@ -360,6 +360,9 @@ graph).
 | `MEMORY_STRICT_VALIDATION` | Enable strict-mode validation | `false` | Type enum enforced (aliases normalized to canonical), reserved tag namespaces (`entity:`/`person:`) rejected, unambiguous credential patterns rejected, per-type content shapes enforced |
 | `MEMORY_AUTHORING_STANDARD_FILE` | Path to the authoring standard document attached to strict-mode `400` bodies | unset | Teaches rejected clients the expected format |
 | `MEMORY_STRICT_CONTRIBUTOR_NAMES` | Comma-separated contributor names rejected in content | unset | Provenance belongs in entity tags/metadata, not content |
+| `MEMORY_DUPLICATE_LOG_TAG` | Tag exempting record-class memories from the duplicate gate | `class:log` | Event-log entries (e.g. one job-application record per role) legitimately share names and phrasing; the namespaced tag avoids collision with topical vocabulary |
+| `MEMORY_DUPLICATE_SUSPECT_LIMIT` | Max advisory duplicate suspects on store/validate responses | `3` | Nearest existing memories by cosine similarity; advisory only, never a rejection |
+| `MEMORY_DUPLICATE_SUSPECT_FLOOR` | Minimum similarity for a duplicate suspect | `0.90` | Below the floor, neighbours are not worth a human glance |
 
 ### Sync Configuration
 

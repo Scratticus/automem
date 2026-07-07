@@ -201,6 +201,19 @@ def _parse_body(lines: Sequence[str]) -> Tuple[Dict[str, str], Dict[str, int], L
     return fields, counts, unparsed
 
 
+def memory_name(content: str) -> Optional[str]:
+    """Extract the identifier from a memory's top line, or None if it has none.
+
+    Names are identifiers: the duplicate gate and the skill renderer both key on
+    them, so extraction must agree with TOP_LINE_RE exactly — never a looser split.
+    """
+    lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    top = TOP_LINE_RE.match(lines[0])
+    return top["name"] if top else None
+
+
 def parse_memory(
     content: str, memory_type: Optional[str]
 ) -> Tuple[Optional[ShapeModel], List[Finding]]:

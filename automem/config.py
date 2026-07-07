@@ -182,6 +182,20 @@ MEMORY_STRICT_CONTRIBUTOR_NAMES = [
     for name in os.getenv("MEMORY_STRICT_CONTRIBUTOR_NAMES", "").split(",")
     if name.strip()
 ]
+# Strict-mode duplicate handling. Memory names are identifiers: a second memory
+# with an existing name is rejected (update the original or rename). Record-class
+# memories that legitimately share names and phrasing (event logs — e.g. one job
+# application entry per role) opt out by carrying the class:log tag. The class:
+# namespace marks what kind of memory a node is (vs topic:/project: = what it is
+# about); a bare topical tag like "log" would collide with ordinary vocabulary
+# and silently exempt memories ABOUT logging. Independently, the nearest existing
+# memories above the suspect floor are attached to store/validate responses as
+# ADVISORY duplicate suspects — never a rejection: corpus calibration (2026-07-07)
+# showed genuine siblings can outscore genuine duplicates on cosine similarity,
+# so similarity alone must not gate.
+MEMORY_DUPLICATE_LOG_TAG = os.getenv("MEMORY_DUPLICATE_LOG_TAG", "class:log").strip().lower()
+MEMORY_DUPLICATE_SUSPECT_LIMIT = int(os.getenv("MEMORY_DUPLICATE_SUSPECT_LIMIT", "3"))
+MEMORY_DUPLICATE_SUSPECT_FLOOR = float(os.getenv("MEMORY_DUPLICATE_SUSPECT_FLOOR", "0.90"))
 
 # Memory types for classification
 MEMORY_TYPES = {"Decision", "Pattern", "Preference", "Style", "Habit", "Insight", "Context"}

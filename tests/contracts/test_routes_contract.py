@@ -6,6 +6,8 @@ EXPECTED_ROUTE_METHODS = {
     ("GET", "/health"),
     ("POST", "/memory"),
     ("POST", "/memory/batch"),
+    ("POST", "/memory/validate"),
+    ("GET", "/rulepack"),
     ("GET", "/memory/<memory_id>"),
     ("PATCH", "/memory/<memory_id>"),
     ("DELETE", "/memory/<memory_id>"),
