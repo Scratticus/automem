@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -649,6 +650,35 @@ def create_memory_blueprint_full(
             # the server file is the ONLY copy anywhere.
             response["authoring_standard"] = authoring_standard(MEMORY_AUTHORING_STANDARD_FILE)
         return jsonify(response)
+
+    @bp.route("/memory/by-name", methods=["GET"])
+    def by_name() -> Any:
+        """Exact-name lookup: names are identifiers under strict mode.
+
+        Unique for authored memories (the duplicate gate enforces it); record-class
+        (class:log) entries may legitimately share a name — hence a list + count.
+        Clients resolving [[name]] / @name references (route anchors, graph links)
+        call this instead of guessing ids.
+        """
+        name = (request.args.get("name") or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+            abort(400, description="'name' must be a memory identifier ([a-z0-9-]+)")
+        graph = get_memory_graph()
+        if graph is None:
+            abort(503, description="FalkorDB is unavailable")
+        result = graph.query(
+            "MATCH (m:Memory) WHERE m.content STARTS WITH $p1 OR m.content STARTS WITH $p2 "
+            "RETURN m LIMIT 25",
+            {"p1": f"{name} |", "p2": f"{name}|"},
+        )
+        memories = []
+        for row in getattr(result, "result_set", None) or []:
+            node = serialize_node(row[0])
+            if memory_name(node.get("content") or "") == name:
+                memories.append(node)
+        if not memories:
+            abort(404, description=f"No memory named {name!r}")
+        return jsonify({"name": name, "count": len(memories), "memories": memories})
 
     @bp.route("/memory", methods=["POST"])
     def store() -> Any:

@@ -92,16 +92,27 @@ class FakeGraph:
         params = params or {}
         self.queries.append((query, params))
 
-        # Strict-mode duplicate-name gate: content-prefix lookup. Must precede the
-        # generic "RETURN m.id, m.content" handlers, which would shadow it.
+        # Name-prefix lookups (duplicate-name gate + /memory/by-name). Must precede
+        # the generic "RETURN m.id, m.content" handlers, which would shadow them.
         if "STARTS WITH $p1" in query:
             p1 = str(params.get("p1") or "")
             p2 = str(params.get("p2") or "")
-            rows = [
-                [memory_id, memory.get("content", ""), memory.get("type"), memory.get("tags", [])]
-                for memory_id, memory in self.memories.items()
+            matches = [
+                memory
+                for memory in self.memories.values()
                 if str(memory.get("content", "")).startswith(p1)
                 or str(memory.get("content", "")).startswith(p2)
+            ]
+            if _returns_whole_memory_node(query):
+                return FakeResult([[FakeNode(memory)] for memory in matches[:25]])
+            rows = [
+                [
+                    memory.get("id"),
+                    memory.get("content", ""),
+                    memory.get("type"),
+                    memory.get("tags", []),
+                ]
+                for memory in matches
             ]
             return FakeResult(rows[:10])
 

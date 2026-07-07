@@ -780,3 +780,35 @@ class TestDuplicateNameGate:
         r = _patch(client, auth_headers, U1, {"tags": ["project:x", "entity:people:eve"]})
         assert r.status_code == 400
         assert any(f["check"] == "reserved-tag-namespace" for f in r.get_json()["findings"])
+
+
+class TestByName:
+    # TESTS: GET /memory/by-name — exact-identifier lookup for [[name]]/@name
+    #   resolution (route anchors, graph links)
+    # FAILS WHEN: no memory carries the name (404) or the name is malformed (400)
+    # PASSES INSTEAD: unique authored names return count 1; class:log record
+    #   entries may share a name and return count > 1
+    def test_unique_name_found(self, client, auth_headers, reset_state):
+        _seed(reset_state, U1, EXISTING)
+        r = client.get("/memory/by-name?name=dup-target", headers=auth_headers)
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["count"] == 1
+        assert body["memories"][0]["id"] == U1
+
+    def test_prefix_is_not_a_match(self, client, auth_headers, reset_state):
+        _seed(reset_state, U1, "dup-target-two | tier:2\nDO differ")
+        r = client.get("/memory/by-name?name=dup-target", headers=auth_headers)
+        assert r.status_code == 404
+
+    def test_log_class_names_can_share(self, client, auth_headers, reset_state):
+        log = "app-2026-07-07-acme | scope:career | tier:2\nDEFINES applied — Acme, role {}."
+        _seed(reset_state, U1, log.format("A"), "Context", tags=["class:log"])
+        _seed(reset_state, U2, log.format("B"), "Context", tags=["class:log"])
+        r = client.get("/memory/by-name?name=app-2026-07-07-acme", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.get_json()["count"] == 2
+
+    def test_malformed_name_rejects(self, client, auth_headers):
+        r = client.get("/memory/by-name?name=Not%20A%20Name!", headers=auth_headers)
+        assert r.status_code == 400
