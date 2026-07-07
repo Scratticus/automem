@@ -1106,12 +1106,25 @@ def create_memory_blueprint_full(
                 )
             importance = coerce_importance(importance)
             confidence = coerce_importance(confidence)
-            # Validate only client-SUPPLIED tags: the inherited tag list contains
-            # server-injected entity:* tags, which are the enrichment worker's to
-            # write — the reserved-namespace check guards client writes only.
-            client_tags = (
-                normalize_tag_list(payload.get("tags")) if payload.get("tags") is not None else []
-            )
+            # Validate only ADDED tags (supplied minus current): PATCH replaces the
+            # tag list wholesale, so a client editing tags MUST resend the node's
+            # inherited server-injected entity:* tags — resending what the node
+            # already carries is not a client write. Only genuinely new tags are
+            # held to the reserved-namespace check.
+            current_tags_lower = {
+                str(t).strip().lower()
+                for t in (current.get("tags") or [])
+                if isinstance(t, str) and t.strip()
+            }
+            client_tags = [
+                t
+                for t in (
+                    normalize_tag_list(payload.get("tags"))
+                    if payload.get("tags") is not None
+                    else []
+                )
+                if str(t).strip().lower() not in current_tags_lower
+            ]
             memory_type, strict_warnings = _strict_gate(new_content or "", memory_type, client_tags)
             # Renaming onto an existing name is the same duplicate as storing one.
             # Exemption checks the MERGED tags: an existing class:log node stays

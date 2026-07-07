@@ -760,3 +760,23 @@ class TestDuplicateNameGate:
         body = r.get_json()
         assert body["findings"] == []
         assert "authoring_standard" not in body
+
+    def test_patch_resending_inherited_entity_tags_passes(
+        self, client, auth_headers, strict, reset_state
+    ):
+        # PATCH replaces tags wholesale, so tag edits MUST resend inherited
+        # server-injected entity:* tags — that is not a client write.
+        _seed(reset_state, U1, EXISTING, tags=["project:x", "entity:people:adam"])
+        r = _patch(
+            client,
+            auth_headers,
+            U1,
+            {"tags": ["project:x", "entity:people:adam", "class:log"]},
+        )
+        assert r.status_code == 200
+
+    def test_patch_adding_new_reserved_tag_rejects(self, client, auth_headers, strict, reset_state):
+        _seed(reset_state, U1, EXISTING, tags=["project:x"])
+        r = _patch(client, auth_headers, U1, {"tags": ["project:x", "entity:people:eve"]})
+        assert r.status_code == 400
+        assert any(f["check"] == "reserved-tag-namespace" for f in r.get_json()["findings"])
