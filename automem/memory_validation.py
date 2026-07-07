@@ -358,16 +358,20 @@ def check_secrets(content: str) -> List[Finding]:
 
 def check_attribution(content: str, contributor_names: Sequence[str]) -> List[Finding]:
     """Provenance lives in tags/metadata (enrichment records contributors);
-    content itself stays attribution-free. Names come from instance config."""
+    content itself stays attribution-free. A name wrapped in [brackets] is a valid
+    graph entity reference (per the authoring standard), not attribution. Names come
+    from instance config."""
+    bare = re.sub(r"\[[^\]]*\]", "", content or "")
     return [
         Finding(
             "attribution-in-content",
             SEVERITY_REJECT,
-            f"Content names a contributor ({name}); provenance belongs to entity tags "
-            "and metadata, not content — remove the name.",
+            f"Content names a contributor ({name}) as bare text; wrap it as the entity "
+            f"reference [{name}] if the subject is valid, else remove it — provenance "
+            "belongs to entity tags and metadata.",
         )
         for name in contributor_names
-        if name and re.search(rf"\b{re.escape(name)}('s|s')?\b", content or "")
+        if name and re.search(rf"\b{re.escape(name)}('s|s')?\b", bare)
     ]
 
 

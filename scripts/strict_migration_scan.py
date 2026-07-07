@@ -13,6 +13,8 @@ Usage:
   strict_migration_scan.py [--endpoint URL] [--json OUT.json] [--top N]
 
 Token: AUTOMEM_TOKEN env var, else keyring automem/api_token.
+Contributor names (attribution check) come from MEMORY_STRICT_CONTRIBUTOR_NAMES,
+the same env the write gate reads; unset = attribution is not audited.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from automem.config import MEMORY_TYPES, TYPE_ALIASES  # noqa: E402
+from automem.config import MEMORY_STRICT_CONTRIBUTOR_NAMES, MEMORY_TYPES, TYPE_ALIASES  # noqa: E402
 from automem.memory_validation import validate_memory  # noqa: E402
 
 REMEDIATION = {
@@ -102,6 +104,7 @@ def main() -> int:
             [],  # stored entity tags are server-injected; tag hygiene is a write-time concern
             known_types=MEMORY_TYPES,
             type_aliases=TYPE_ALIASES,
+            contributor_names=MEMORY_STRICT_CONTRIBUTOR_NAMES,
         )
         rejections = [f for f in findings if f.severity == "reject"]
         if not rejections:
@@ -135,6 +138,10 @@ def main() -> int:
 
     print(
         f"nodes: {len(nodes)} total | {system_nodes} system-generated (skipped) | {authored} authored"
+    )
+    print(
+        "contributor names enforced: "
+        + (", ".join(MEMORY_STRICT_CONTRIBUTOR_NAMES) or "(none — attribution check INACTIVE)")
     )
     print(
         f"authored memories passing the strict gate: {clean} ({clean * 100 // max(authored, 1)}%)"

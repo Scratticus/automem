@@ -198,6 +198,14 @@ class TestUniversalChecks:
         _, findings = _validate(content, contributor_names=["Alice"])
         assert _rejects(findings, "attribution-in-content")
 
+    def test_attribution_bracketed_entity_ref_passes(self):
+        # a name wrapped in [brackets] is a graph entity reference, not attribution
+        _, findings = _validate(
+            "owner-habit | tier:2\nDO whatever [Alice] prefers",
+            contributor_names=["Alice"],
+        )
+        assert not _rejects(findings, "attribution-in-content")
+
 
 # =============================================================================
 # TESTS: composition checks — the gate is hard; there is no warn tier
